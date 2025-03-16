@@ -37,11 +37,11 @@ def async_api(_: gr.Blocks, app: FastAPI):
             return [Depends(auth)]
         return []
     
-    @app.get("/sd-queue/login", dependencies=get_auth_dependency())
+    @app.get("/sdapi/queue/login", dependencies=get_auth_dependency())
     async def login():
         return {"status": True, "version": version}
     
-    @app.post("/sd-queue/txt2img", dependencies=get_auth_dependency())
+    @app.post("/sdapi/queue/txt2img", dependencies=get_auth_dependency())
     async def txt2imgapi(request: Request, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
         route = next((route for route in request.app.routes if route.path == "/sdapi/v1/txt2img"), None)
         if route:
@@ -52,7 +52,7 @@ def async_api(_: gr.Blocks, app: FastAPI):
                 raise HTTPException(status_code=503, detail="Queue is full")
         return {"status": "error"}
 
-    @app.get("/sd-queue/{task_id}/status", dependencies=get_auth_dependency())
+    @app.get("/sdapi/queue/{task_id}/status", dependencies=get_auth_dependency())
     async def get_task_status(task_id: str, request: Request):
         task = task_manager.get_status(task_id)
         if not task:
@@ -77,7 +77,7 @@ def async_api(_: gr.Blocks, app: FastAPI):
         
         return response
 
-    @app.delete("/sd-queue/{task_id}/remove", dependencies=get_auth_dependency())
+    @app.delete("/sdapi/queue/{task_id}/remove", dependencies=get_auth_dependency())
     async def remove_specific_task(task_id: str):
         if task_manager.remove_specific_task(task_id):
             return {"status": "success", "message": f"Task {task_id} has been removed"}
