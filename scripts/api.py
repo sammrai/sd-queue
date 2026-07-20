@@ -79,9 +79,16 @@ def async_api(_: gr.Blocks, app: FastAPI):
 
     @app.delete("/sdapi/queue/{task_id}/remove", dependencies=get_auth_dependency())
     async def remove_specific_task(task_id: str):
-        if task_manager.remove_specific_task(task_id):
+        result = task_manager.remove_specific_task(
+            task_id, interrupt_callback=lambda: shared.state.interrupt()
+        )
+        if result == "removed":
             return {"status": "success", "message": f"Task {task_id} has been removed"}
-        else:
-            raise HTTPException(status_code=400, detail="Task not found or cannot be removed because it's in progress")
+        elif result == "interrupted":
+            return {"status": "success", "message": f"Task {task_id} was in progress and has been interrupted"}
+        elif result == "not_found":
+            raise HTTPException(status_code=404, detail="Task not found")
+        else:  # "not_removable"
+            raise HTTPException(status_code=400, detail="Task cannot be removed in its current state")
 
 script_callbacks.on_app_started(async_api)

@@ -9,26 +9,42 @@ class TaskManager:
         self.tasks_queue = deque()
         self.stop_worker = threading.Event()
         self.lock = threading.Lock()
+        # 現在ワーカーが処理中のタスクID（実行中タスクのinterrupt判定に使用）
+        self.current_task_id = None
+        # interruptを要求されたタスクIDの集合
+        self.cancelled_tasks = set()
         self._worker_start()
-
-    def _update_status(self, task_id, status, result=None):
-        with self.lock:
-            if task_id in self.tasks_db:
-                self.tasks_db[task_id]["status"] = status
-                if result is not None:
-                    self.tasks_db[task_id]["result"] = result
 
     def _worker(self):
         while not self.stop_worker.is_set():
             if self.tasks_queue:
                 with self.lock:
                     func, args, task_id = self.tasks_queue.popleft()
+                    self.current_task_id = task_id
+                    # pop直後の同じロック内でin-progressを確定させ、
+                    # この間にremoveが来てもpending扱いにならないようにする。
+                    if task_id in self.tasks_db:
+                        self.tasks_db[task_id]["status"] = "in-progress"
                 try:
-                    self._update_status(task_id, "in-progress")
                     result = func(*args)
-                    self._update_status(task_id, "completed", result)
+                    final_status, final_result = "completed", result
                 except Exception as e:
-                    self._update_status(task_id, "failed", result=str(e))
+                    final_status, final_result = "failed", str(e)
+
+                # cancelled判定・最終ステータス確定・後片付けを単一クリティカルセクションで
+                # 行う。これによりremove側の"interrupted"とworker側の"completed/failed"が
+                # 上書き競合するのを防ぎ、finalize後に来たremoveは必ずnot_removableとなる
+                # （＝完了済みタスクに対する無駄なinterrupt発火も起きない）。
+                with self.lock:
+                    if task_id in self.cancelled_tasks:
+                        # interrupt要求済みならcompleted/failedに関わらずinterruptedで確定
+                        final_status, final_result = "interrupted", None
+                    if task_id in self.tasks_db:
+                        self.tasks_db[task_id]["status"] = final_status
+                        if final_result is not None:
+                            self.tasks_db[task_id]["result"] = final_result
+                    self.current_task_id = None
+                    self.cancelled_tasks.discard(task_id)
             else:
                 self.stop_worker.wait(timeout=0.1)
 
@@ -75,10 +91,38 @@ class TaskManager:
         with self.lock:
             return {k: v["status"] for k, v in self.tasks_db.items()}
 
-    def remove_specific_task(self, task_id):
+    def remove_specific_task(self, task_id, interrupt_callback=None):
+        """タスクを削除、または実行中の場合は生成をinterruptする。
+
+        戻り値:
+            "removed"       : 待機中(pending)タスクをキューから削除した
+            "interrupted"   : 実行中(in-progress)タスクにinterruptを要求した
+            "not_found"     : task_idが存在しない
+            "not_removable" : 上記以外（既に完了/失敗など）で削除不可
+        """
+        interrupt_needed = False
         with self.lock:
-            if task_id in self.tasks_db and self.tasks_db[task_id]["status"] == "pending":
+            task = self.tasks_db.get(task_id)
+            if task is None:
+                return "not_found"
+
+            status = task["status"]
+            if status == "pending":
                 del self.tasks_db[task_id]
                 self.tasks_queue = deque(item for item in self.tasks_queue if item[2] != task_id)
-                return True
-        return False
+                return "removed"
+
+            if status == "in-progress" and task_id == self.current_task_id:
+                # ワーカーが実行中の生成をinterruptする。
+                # ステータスは即座にinterruptedへ更新し、ワーカーは終了時にこれを維持する。
+                self.cancelled_tasks.add(task_id)
+                task["status"] = "interrupted"
+                interrupt_needed = True
+            else:
+                return "not_removable"
+
+        # interruptのコールバックはグローバルなフラグを立てるだけで非ブロッキングなので
+        # ロック外で呼び出す。
+        if interrupt_needed and interrupt_callback is not None:
+            interrupt_callback()
+        return "interrupted"
