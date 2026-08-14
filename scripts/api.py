@@ -65,6 +65,11 @@ def async_api(_: gr.Blocks, app: FastAPI):
 
         if task["status"] == "completed":
             response["result"] = task["result"]
+        elif task["status"] == "failed":
+            # ワーカーが例外の str(e) を result に格納しているが、これまで返していなかった
+            # ため、呼び出し側は failed の理由を知る手段が無かった。tasks_db はオンメモリで
+            # 失敗時点を過ぎると消えるので、ここで返さないと原因は永久に失われる。
+            response["error"] = task.get("result")
         elif task["status"] == "in-progress":
             route = next((route for route in request.app.routes if route.path == "/sdapi/v1/progress"), None)
             if route:
